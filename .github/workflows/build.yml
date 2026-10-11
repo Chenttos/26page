@@ -1,0 +1,234 @@
+name: Build R3v4mp
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build R3v4mp
+    runs-on: ubuntu-24.04
+
+    steps:
+
+      # ================================================
+      # CHECKOUT
+      # ================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ================================================
+      # CHECK ENVIRONMENT
+      # ================================================
+      - name: Check environment
+        run: |
+          set -e
+
+          echo "================================"
+          echo "GitHub Actions environment"
+          echo "================================"
+
+          echo "OS:"
+          cat /etc/os-release
+
+          echo ""
+          echo "Architecture:"
+          uname -m
+
+          echo ""
+          echo "Tools:"
+          command -v bash
+          command -v curl
+          command -v git
+          command -v make
+          command -v perl
+          command -v unzip
+          command -v rsync
+
+      # ================================================
+      # INSTALL ONLY MISSING PACKAGES
+      # ================================================
+      - name: Install missing dependencies
+        run: |
+          set -e
+
+          echo "================================"
+          echo "Checking dependencies"
+          echo "================================"
+
+          MISSING=""
+
+          command -v fakeroot >/dev/null 2>&1 || MISSING="$MISSING fakeroot"
+          command -v rsync >/dev/null 2>&1 || MISSING="$MISSING rsync"
+
+          if [ -n "$MISSING" ]; then
+            echo "Missing packages:$MISSING"
+
+            sudo apt-get install -y \
+              -o Acquire::ForceIPv4=true \
+              -o Acquire::Retries=2 \
+              -o Acquire::http::Timeout=20 \
+              -o Acquire::https::Timeout=20 \
+              $MISSING
+          else
+            echo "All required dependencies are already installed."
+          fi
+
+      # ================================================
+      # INSTALL THEOS
+      # ================================================
+      - name: Install Theos
+        env:
+          THEOS: /home/runner/theos
+          CI: "1"
+        run: |
+          set -e
+
+          echo "================================"
+          echo "Installing Theos (roothide fork, supports rootless + roothide)"
+          echo "================================"
+
+          git clone --recursive \
+            --depth 1 \
+            https://github.com/roothide/theos.git \
+            "$THEOS"
+
+          echo "Theos cloned."
+
+      # ================================================
+      # INSTALL THEOS TOOLCHAIN
+      # ================================================
+      - name: Install Theos toolchain
+        env:
+          THEOS: /home/runner/theos
+        run: |
+          set -e
+
+          echo "================================"
+          echo "Installing iOS toolchain"
+          echo "================================"
+
+          mkdir -p "$THEOS/toolchain"
+
+          curl -fL \
+            --retry 3 \
+            --connect-timeout 20 \
+            --max-time 300 \
+            https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz \
+            -o /tmp/iOSToolchain.tar.xz
+
+          tar -xJf \
+            /tmp/iOSToolchain.tar.xz \
+            -C "$THEOS/toolchain"
+
+          echo "Toolchain installed."
+
+      # ================================================
+      # INSTALL SDK
+      # ================================================
+      - name: Install iOS SDK
+        env:
+          THEOS: /home/runner/theos
+        run: |
+          set -e
+
+          echo "================================"
+          echo "Installing iOS SDK"
+          echo "================================"
+
+          "$THEOS/bin/install-sdk" latest
+
+      # ================================================
+      # VERIFY THEOS
+      # ================================================
+      - name: Verify Theos
+        env:
+          THEOS: /home/runner/theos
+        run: |
+          set -e
+
+          echo "================================"
+          echo "Theos verification"
+          echo "================================"
+
+          test -d "$THEOS"
+
+          test -f "$THEOS/makefiles/common.mk"
+
+          test -x \
+            "$THEOS/toolchain/linux/iphone/bin/clang"
+
+          echo ""
+          echo "clang:"
+          "$THEOS/toolchain/linux/iphone/bin/clang" --version
+
+          echo ""
+          echo "SDKs:"
+          ls -lah "$THEOS/sdks"
+
+          echo ""
+          echo "================================"
+          echo "Theos OK"
+          echo "================================"
+
+      # ================================================
+      # BUILD R3V4MP (rootless + roothide)
+      # ================================================
+      - name: Build R3v4mp (rootless)
+        env:
+          THEOS: /home/runner/theos
+        run: |
+          set -e
+          make clean
+          rm -rf packages
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mkdir -p out
+          debs=(packages/*.deb); test ${#debs[@]} -eq 1
+          cp "${debs[0]}" out/R3v4mp-rootless.deb
+
+      - name: Build R3v4mp (roothide)
+        env:
+          THEOS: /home/runner/theos
+        run: |
+          set -e
+          make clean
+          rm -rf packages
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+          mkdir -p out
+          debs=(packages/*.deb); test ${#debs[@]} -eq 1
+          cp "${debs[0]}" out/R3v4mp-roothide.deb
+
+      # ================================================
+      # SHOW PACKAGE
+      # ================================================
+      - name: Show packages
+        if: success()
+        run: |
+          echo "================================"
+          echo "Generated packages"
+          echo "================================"
+
+          ls -lah out/
+
+      # ================================================
+      # UPLOAD DEB
+      # ================================================
+      # Unzipped uploads: GitHub's artifact zip fails to open in the iPhone Files app
+      # ("Bad message"), so each .deb is uploaded as a plain file (needs upload-artifact v7).
+      - name: Upload R3v4mp (rootless)
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          path: out/R3v4mp-rootless.deb
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload R3v4mp (roothide)
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          path: out/R3v4mp-roothide.deb
+          archive: false
+          if-no-files-found: error
